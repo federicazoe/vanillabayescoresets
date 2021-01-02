@@ -1,0 +1,27 @@
+Package: vanillabayescoresets
+Type: Package
+Title: Bayesian Coresets for logistic regression
+Version: 0.1.0
+Authors@R: c(
+    person("Federica Zoe", "Ricci", email = "fzricci@uci.edu", role = c("aut", "cre")),
+    person("Rachel", "Longjohn", email = "rlongjoh@uci.edu", role = "aut")
+    )
+Description: Obtains Frank-Wolfe and Uniform coresets for logistic regression 
+    binary data and plots coresets obtained for the case with two covariates 
+    with/without an intercept. 
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Suggests: 
+    testthat,
+    knitr,
+    rmarkdown
+Imports:
+    stats,
+    ggplot2,
+    dplyr,
+    LaplacesDemon,
+    mvtnorm,
+    purrr
+RoxygenNote: 7.1.1
+VignetteBuilder: knitr

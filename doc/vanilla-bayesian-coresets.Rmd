@@ -1,0 +1,264 @@
+---
+title: "Vanilla Bayesian Coresets"
+output: 
+  rmarkdown::html_vignette:
+    fig_width: 6
+    fig_height: 4
+vignette: >
+  %\VignetteIndexEntry{vanilla-bayesian-coresets}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+<style type="text/css">
+  body{
+  font-size: 11pt;
+}
+</style>
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+options(rmarkdown.html_vignette.check_title = FALSE)
+```
+
+This package implements [Bayesian coresets](https://arxiv.org/abs/1710.05053) for binary logistic regression data. The types of coresets that are currently supported are the [uniform coresets](https://arxiv.org/abs/1605.06423) and the [Hilbert Frank–Wolfe coresets](https://arxiv.org/abs/1710.05053).
+
+Through vanillabayescoresets' functions you will be able to:
+
+* obtain uniform or Hilbert Frank-Wolfe coresets for binary logistic regression data, setting the size of the coreset along with other construction parameters.
+* plot the coreset selected over the full dataset, for the case with two covariates, to visualize which datapoints are selected and what weight is assigned to them by the two methods.
+* quickly generate synthetic binary data, customizing the size of the sample, the number and the generative model of covariates and the model parameters.
+
+This document guides you through the functionalities of this package. 
+
+Let's get started by loading the package:
+
+```{r setup}
+library(vanillabayescoresets)
+```
+
+
+### A little background, first!
+
+Fitting Bayesian models on large datasets using standard methods such as Markov Chain Monte Carlo can be computationally very expensive and sometimes unfeasible. 
+Several modifications of MCMC, as well as alternative methods like Variational Inference, have emerged to scale inference on the full dataset.
+Bayesian coresets are a different approach that achieves scalability by focusing on a pre-processing step, aimed at delivering a small, weighted subsample of the full data on which to run any inference algorithm.
+
+## Simulating Binary Data
+
+In order to apply the methods of finding coresets described by Huggins et al. and Campbell et al., we will first need some binary data. 
+You can use your own binary dataset with the [`get_coreset_uniform()`](#uniform-coreset) and [`get_coreset_frankwolfe()`](#hilbert-coreset) methods described below, or you can use our function, `simulate_logit_data()` to easily simulate binary data that you can use to experiment. 
+The easiest way to use the `simulate_logit_data()` function is to simply use the default parameter settings and save the results to a list.
+
+```{r}
+data <- simulate_logit_data()
+names(data)
+```
+
+As you can see above, the function returned a list with three elements. `y` is a vector of the binary reponses, where $y_i \in \{-1, 1\}$, `x` is the feature matrix, and `theta` is the vector of coefficients. Let's take a look at some basic properties of these objects.
+
+```{r}
+length(data$y)
+dim(data$x)[1]
+dim(data$x)[2]
+length(data$theta)
+head(data$y)
+```
+
+Without further specification, `simulate_logit_data` returned a $10000 \times 1$ vector for `y`, and a $10000 \times 3$ matrix for `x`. The data are simulated using the standard logistic regression model, i.e.
+
+$$
+\ln \left(\dfrac{p_i}{1-p_i}\right) = X\theta
+$$
+with $p_i = Pr(y_i = 1)$, $Y_{nx1} = \{y_i, i = 1, ..., n\}$, $X_{nxd}$, and $\theta_{dx1}$. In accordance with the model specified in Campbell et al., the default value for `theta` is $\theta = (3, 3, 0)$. We can choose to further customize these specifications if we wish.
+
+### Dimension specifications
+
+Most custom specifications can be included in the `params` input parameter. For example, if you want to choose the number of independent observations, $n$, you can do
+
+```{r}
+data <- simulate_logit_data(params = list(n = 5000))
+length(data$y)
+dim(data$x)[1]
+```
+
+which sets $n = 5000$. 
+
+We can also change the number of covariates by specifying a new vector of parameters for $\theta$
+
+```{r}
+data <- simulate_logit_data(params = list(n = 5000, theta = c(1, 2, 3, 4)))
+length(data$theta)
+dim(data$x)[2]
+```
+
+which sets $\theta = (1, 2, 3, 4)$.
+
+By default, `simulate_logit_data` has been sampling our `x` values from a multivariate normal distribution with the identity matrix as the covariance. To see this, let's take a look at the first few rows of `x`.
+
+```{r}
+head(data$x)
+```
+
+We can further customize this generative model for `x`. 
+
+### Generative model specifications {#model-specs}
+
+If you want to get closer to real-world data, you may want to specify a covariance matrix with nonzero covariances. You can do this with
+
+```{r}
+dependent_sigma <- matrix(c(1, 0.1, 0.2, 1), byrow = TRUE, ncol = 2, nrow = 2)
+dependent_sigma
+data <- simulate_logit_data(params = list(sigma = dependent_sigma))
+```
+
+Instead of generating values from a normal distribution, we can also generate binary values for `x` by specifying `model = "bernoulli"`, e.g.
+
+```{r}
+data <- simulate_logit_data(model = "bernoulli")
+head(data$x)
+```
+
+We can further customize our Bernoulli model by specifying the probability parameters for each column of `x`. This can be done by
+
+```{r}
+data <- simulate_logit_data(model = "bernoulli", params = list(px = c(0.2, 1)))
+head(data$x)
+```
+where the last column is the intercept column. 
+You can choose not to include the intercept by setting `intercept = FALSE`.
+
+```{r}
+data <- simulate_logit_data(model = "bernoulli", 
+                            params = list(theta = c(3, 3), 
+                                          px = c(0.2, 1), 
+                                          intercept = FALSE))
+head(data$x)
+```
+
+Now that we have some binary data to work with, we can start looking at methods of getting coresets.
+
+## Uniform Coreset Method {#uniform-coreset}
+
+The function [`get_coreset_uniform()`](#uniform-coreset) implements the uniform coresets for binary logistic data, as detailed in Algorithm 1 of [J. Huggins et al. (2016)](https://arxiv.org/abs/1605.06423). The only inputs that are required are:
+
+* `x`: a feature matrix
+* `y`: a binary response vector
+
+which can be from your own dataset or generated using `simulate_logit_data()`. 
+For example, the code below will generate a coreset using the uniform coreset method with all the default specifications.
+
+```{r}
+data <- simulate_logit_data()
+coreset <- get_coreset_uniform(data$x, data$y)
+length(coreset$datapoints_selected)
+```
+
+### Uniform Coreset Customizations
+
+By default, the maximum number of observations that will be selected for the coreset is $\lfloor\dfrac{n}{10}\rfloor$. This can be specified through the `m` input parameter as shown below.
+
+```{r}
+coreset <- get_coreset_uniform(data$x, data$y, m = 500)
+length(coreset$datapoints_selected)
+```
+
+In order to estimate each data point's sensitivity, the function needs to first compute a kmeans clustering of the data. The default number of clusters is 4 (which is the number of clusters used in J. Huggins et al.) for datasets with $n \leq 10,000$ and $\lfloor\dfrac{n}{2500}\rfloor$ for datasets with $n > 10,000$, but this parameter can be directly specified in the function as well.
+
+```{r}
+coreset <- get_coreset_uniform(data$x, data$y, num_clusters = 5)
+```
+
+You can also specify a search radius `r` for the parameter space which is set to 4 by default per the discussion in [J. Huggins et al. (2016)](https://arxiv.org/abs/1605.06423). Lastly, because calculating coresets is not a deterministic procedure, you can choose to set a seed so that the results of `get_coreset_uniform()` are reproducible given the same input parameters, and set `verbose = TRUE` to see status messages printed to the console.
+
+## Hilbert Frank-Wolfe Coreset Method {#hilbert-coreset}
+
+The function `get_coreset_frankwolfe()` implements the Hilbert Frank-Wolfe coresets for binary logistic data, as detailed in Algorithms 2 and 3 and Sections 4.2 and 5 of [T. Campbell and T. Broderick (2019)](https://arxiv.org/abs/1710.05053). 
+
+The required inputs of this function are the same as those of [`get_coreset_uniform()`](#uniform-coreset): a matrix `x` of covariates and a vector `y` of binary observations in $\{-1, 1\}$:
+
+```{r, message = FALSE}
+data <- simulate_logit_data()
+dplyr::glimpse(data$x)
+dplyr::glimpse(data$y)
+coreset <- get_coreset_frankwolfe(x = data$x, y = data$y)
+```
+
+The last call is equivalent to:
+
+```{r, message = FALSE}
+coreset <- get_coreset_frankwolfe(x = data$x,
+                                  y = data$y,
+                                  m = as.integer(length(data$y) / 10),
+                                  num_projections = 500,
+                                  seed = 1234,
+                                  verbose = FALSE)
+```
+
+From there, we can see what the optional parameters are and their default values. As for [`get_coreset_uniform()`](#uniform-coreset), `m` controls the (maximum) number of data points included in the coreset, and defaults to roughly one tenth of the original data points. 
+
+The parameter `num_projections` is specific to the Hilbert Frank-Wolfe method: this method requires the norm of the likelihood gradient, whose computation is intractable, and so an approximate norm is computed using a finite-dimensional projection of the likelihood obtained by evaluating the likelihood at a number `num_projections` of parameters sampled from an approximate posterior distribution obtained through a Laplace Approximation. The default  `num_projections` is set to 500, as in the reference paper.
+
+Lastly, the parameter `seed` allows to set a seed for reproducibility of results and the parameter `verbose` regulates whether messages are printed throughout the execution of the function that inform the user on the step of the algorithm that is being implemented (only messages printed by [`LaplaceApproximation()`](https://www.rdocumentation.org/packages/LaplacesDemon/versions/16.1.4/topics/LaplaceApproximation) will be shown).
+
+Note: the prior on model parameters that is currently supported is a multivariate standard normal; the only step at which the prior is considered is for the computation of the Laplace Approximation of the posterior.
+
+## Visualizing the Coresets
+
+Once a coreset has been obtained, how to better appreciate the result than with some plotting?  
+In the current version of this package, we provide a function for plotting the datapoints against **two** continuous covariates, labeling them as either failures (i.e. y = -1) or successes (i.e. y = 1), marking the data points selected in the coreset and representing their weight as the point's size.
+
+The first argument required by the function `visualize_coreset()` is an object in which the output of either the [get_coreset_uniform()](#uniform-coreset) or the [get_coreset_frankwolfe()](#hilbert-coreset) function has been stored. The other two required arguments are the matrix `x` of covariates and the vector `y` of binary observations in $\{-1, 1\}$. We may have to specify where the intercept column is located in matrix of covariates (default is the third column)
+
+```{r, fig.align="center"}
+# Plotting uniform coresets
+coreset_uniform <- get_coreset_uniform(data$x, data$y, num_clusters = 5)
+visualize_coresets(coreset_uniform, data$x, data$y, intercept_col = 3)
+```
+
+```{r, , fig.align="center"}
+# Plotting Hilbert Frank-Wolfe coresets
+coreset_frankwolfe <- get_coreset_frankwolfe(data$x, data$y)
+visualize_coresets(coreset_frankwolfe, data$x, data$y, intercept_col = 3)
+```
+
+We can customize our plot by suppressing the legend for either the coreset point's weight or the full-data point's true label (or both), by changing the axis' labels, by overlay an equation line. In the latter case, we provide as argument a vector whose first and second elements are, respectively, the intercept and the slope of the equation line:
+
+```{r, fig.align="center"}
+# Making optional changes
+y_glm <- (data$y + 1) /2 # recode for glm call
+glm_estimates <- glm(y_glm ~ data$x[, 1] + data$x[, 2], family = "binomial")
+coeffs <- glm_estimates$coefficients
+intercept <- - coeffs[1] / coeffs[3]
+slope <- - coeffs[2] / coeffs[3]
+
+visualize_coresets(coreset_frankwolfe, 
+                   data$x, 
+                   data$y, 
+                   legend_true_label = FALSE,
+                   legend_weights = FALSE,
+                   name_variables = c("Variable 1", "Variable 2"),
+                   equation_line = c(intercept, slope))
+```
+
+
+
+## References
+
+The functions implemented in vanillabayescoresets (in R) are simplified versions of some of the functions implemented in Python by the packages [lrcoresets](https://bitbucket.org/jhhuggins/lrcoresets/src/master/coresets/) and [bayesian-coresets](https://github.com/trevorcampbell/bayesian-coresets), created by Jonathan H. Huggins and Trevor Campbell. 
+
+To dive deeper into the development, the derivations, the theoretical results and the advancements on Bayesian coresets, here is a list of publications:
+
+* J. Huggins, T. Campbell and T. Broderick, ["Coresets for scalable Bayesian logistic regression"](https://arxiv.org/abs/1710.05053) (2016)
+* T. Campbell and T. Broderick, ["Bayesian coreset construction via Greedy Iterative Geodesic Ascent"](https://arxiv.org/abs/1802.01737) (2018)
+* T. Campbell and T. Broderick, ["Automated scalable Bayesian inference via Hilbert coresets"](https://arxiv.org/abs/1710.05053) (2019)
+* T. Campbell and B. Beronov, ["Sparse Variational Inference: Bayesian Coresets from Scratch"](https://arxiv.org/abs/1906.03329) (2019)
+
+And to start gaining familiarity and intuitions on this framework, here is a collection of some great tutorials:
+
+* J. Huggins, ["Coresets for Bayesian Logistic Regression"](https://www.youtube.com/watch?v=K_rjc4YMY3U) (2016)
+* T. Broderick, ["Variational Bayes and Beyond: Bayesian Inference for Big Data"](https://www.youtube.com/watch?v=Moo4-KR5qNg&t=5667s) (2018)
+* T. Campbell, ["Persistent Learning via Data Summarization"](https://www.youtube.com/watch?v=_8caIFEeBhY) (2020)
