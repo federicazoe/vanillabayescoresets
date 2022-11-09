@@ -25,3 +25,4 @@ Imports:
     purrr
 RoxygenNote: 7.1.1
 VignetteBuilder: knitr
+URL: https://federicazoe.github.io/vanillabayescoresets/
