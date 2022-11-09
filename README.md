@@ -1,5 +1,5 @@
 
-# vanillabayescoresets <img src='man/figures/logo.png' align="right" height="140" />
+# vanillabayescoresets <img src='man/figures/logo.png' align="right" height="140" width="160">
 
 This package implements [Bayesian
 coresets](https://arxiv.org/abs/1710.05053) for binary logistic
